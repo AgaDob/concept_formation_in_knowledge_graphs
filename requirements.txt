@@ -1,0 +1,10 @@
+torch
+numpy
+scikit-learn
+networkx
+typing
+parameterized
+ax-platform
+pytest
+pytest-xdist
+pytest-forked
