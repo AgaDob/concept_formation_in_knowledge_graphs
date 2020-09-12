@@ -21,14 +21,12 @@ import pandas as pd
 import torch
 from torch import nn, optim
 
-from kbc.data_augmentation.stratified_sampling import stratified_sampling
+from metakbc.training.data import Data
+from metakbc.training.batcher import Batcher
 
-from kbc.training.data import Data
-from kbc.training.batcher import Batcher
-
-from kbc.models import DistMult, ComplEx
-from kbc.regularizers import F2, N3
-from kbc.evaluation import evaluate
+from metakbc.models import DistMult, ComplEx
+from metakbc.regularizers import F2, N3
+from metakbc.evaluation import evaluate
 
 import logging
 import os.path
@@ -42,6 +40,19 @@ def metrics_to_str(metrics):
     return f'MRR {metrics["MRR"]:.6f}\tH@1 {metrics["hits@1"]:.6f}\tH@3 {metrics["hits@3"]:.6f}\t' \
         f'H@5 {metrics["hits@5"]:.6f}\tH@10 {metrics["hits@10"]:.6f}\tH@50 {metrics["hits@50"]:.6f}\t' \
         f'H@100 {metrics["hits@100"]:.6f}'
+
+
+def build_assignment_dict(data):
+  concept_assignment_dict = {}
+
+  for triple in data.train_triples:
+    s, p, o = triple
+    if o[:9] == 'concept__':
+      ent_idx = data.entity_to_idx[s]
+      concept_idx = data.entity_to_idx[o]
+      concept_assignment_dict[ent_idx] = concept_idx
+
+  return concept_assignment_dict
 
 
 def get_ent_and_pred_indexes(data, device):
@@ -172,6 +183,9 @@ def main(argv):
     # Optional stratified sampling
     parser.add_argument('--alpha', action='store', type=float, default=None)
 
+    # Default Reasoning Modification
+    parser.add_argument('--mod', action='store', type=str, default='replace', choices=['replace','add'])
+
 
 
 
@@ -226,6 +240,7 @@ def main(argv):
     save_path = args.save
 
     is_quiet = args.quiet
+    modification = args.mod
 
     # set the seeds
     np.random.seed(seed)
@@ -549,24 +564,55 @@ def main(argv):
 
         logger.info(f'Final \t{name} results\t{metrics_to_str(metrics)}')
 
-
-    ### Append best results to csv
-    for metrics, name in [[best_metrics_dev, 'dev'], [best_metrics_test, 'test']]:
-        results_original = pd.DataFrame({'dataset': data_name, 'dev/test': name, 'n_clusters' : n_clusters , 'cluster_type': cluster_type, 'metric': metric, 'embeddings_string' : embeddings_path, 'alpha' : alpha,  'MRR': metrics['MRR'] , 'H1': metrics['hits@1'], 'H3':  metrics['hits@3'], 'H5': metrics['hits@5'], 'H10': metrics['hits@10'], 'H50': metrics['hits@50'], 'H100': metrics['hits@100'], 'best_epoch': best_epoch,'lr': learning_rate, 'F2': F2_weight, 'N3': N3_weight, 'seed' : seed, 'model':model_name,  'embedding_size': embedding_size, 'batch_size': batch_size, 'nb_epochs':nb_epochs}, index=[0])
-
-        if os.path.exists(results_csv_path):
-            all_results = pd.read_csv(results_csv_path)
-            all_results = all_results.append(results_original, ignore_index=True)
-            all_results.to_csv(results_csv_path, index=False, header=True)
-            print('Appended! Destination: {}'.format(results_csv_path))
-        else:
-            results_original.to_csv(results_csv_path, index=False, header=True)
-            print('Appended!')
-
     if save_path is not None:
         torch.save(param_module.state_dict(), save_path)
 
     logger.info("Training Finished")
+
+
+    ############# Default Reasoning begins
+    print('Default reasoning...')
+      # modify the embeddings
+    with torch.no_grad():
+        all_embeddings = param_module.state_dict()['entities.weight']
+        all_embeddings_modified = all_embeddings
+
+    concept_assignment_dict = build_assignment_dict(data)
+
+
+    for entity_id, concept_id in concept_assignment_dict.items():
+        ent_idx = torch.tensor(entity_id, dtype=torch.long, device=device)
+        concept_idx = torch.tensor(concept_id, dtype=torch.long, device=device)
+        ent_embedding = all_embeddings[ent_idx]
+        concept_embedding = all_embeddings[concept_idx]
+
+        with torch.no_grad():
+          if modification == 'add':
+            all_embeddings_modified[ent_idx] += concept_embedding
+          if modification == 'replace':
+            all_embeddings_modified[ent_idx] = concept_embedding
+
+    # extract only the entity embeddings
+    entity_embeddings_nc = nn.Embedding(original_data.nb_entities, rank, sparse=True)
+    entity_indices = np.array(tensor_ent_index.cpu())
+    entity_embeddings_no_clusters = all_embeddings_modified[entity_indices,:].cuda()
+    entity_embeddings_nc.weight.data = entity_embeddings_no_clusters
+
+    for triples, name in [(t, n) for t, n in original_triples_name_pairs if len(t) > 0]:
+        metrics = evaluate(entity_embeddings=entity_embeddings_nc, predicate_embeddings=predicate_embeddings_nc,
+                        test_triples=triples, all_triples=original_data.all_triples,
+                        entity_to_index=original_data.entity_to_idx, predicate_to_index=original_data.predicate_to_idx,
+                        model=model, batch_size=eval_batch_size, device=device)
+
+        results_original = pd.DataFrame({'dataset': data_name, 'dev/test': name, 'modification': modification, 'n_clusters' : n_clusters , 'cluster_type': cluster_type, 'metric': metric, 'embeddings_string' : embeddings_path,  'MRR': metrics['MRR'] , 'H1': metrics['hits@1'], 'H3':  metrics['hits@3'], 'H5': metrics['hits@5'], 'H10': metrics['hits@10'], 'H50': metrics['hits@50'], 'H100': metrics['hits@100'], 'best_epoch': best_epoch,'lr': learning_rate, 'F2': F2_weight, 'N3': N3_weight, 'seed' : seed, 'model':model_name,  'embedding_size': embedding_size, 'batch_size': batch_size, 'nb_epochs':nb_epochs}, index=[0])
+        if os.path.exists(results_csv_path):
+            all_results = pd.read_csv(results_csv_path)
+            all_results = all_results.append(results_original, ignore_index=True)
+            all_results.to_csv(results_csv_path, index=False, header=True)
+        else:
+            results_original.to_csv(results_csv_path, index=False, header=True)
+
+        print(f'Final \t{name} concept representation results\t{metrics_to_str(metrics)}')
 
 
 

@@ -20,7 +20,7 @@ import multiprocessing
 import numpy as np
 import pandas as pd
 
-from metakbc.training.data import Data
+from kbc.training.data import Data
 
 
 def propositionalization_2P(data, binary= False):

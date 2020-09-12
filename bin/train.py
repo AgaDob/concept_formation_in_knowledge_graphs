@@ -13,12 +13,12 @@ import pandas as pd
 import torch
 from torch import nn, optim
 
-from metakbc.training.data import Data
-from metakbc.training.batcher import Batcher
+from kbc.training.data import Data
+from kbc.training.batcher import Batcher
 
-from metakbc.models import DistMult, ComplEx
-from metakbc.regularizers import F2, N3
-from metakbc.evaluation import evaluate
+from kbc.models import DistMult, ComplEx
+from kbc.regularizers import F2, N3
+from kbc.evaluation import evaluate
 
 import logging
 import os.path

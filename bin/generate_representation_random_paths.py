@@ -21,7 +21,7 @@ from collections import Counter
 from tqdm import tqdm
 
 
-from metakbc.training.data import Data
+from kbc.training.data import Data
 
 
 
